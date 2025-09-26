@@ -29,6 +29,7 @@ load_dotenv()
 MONGODB_CONNECTION_STRING = os.getenv("MONGODB_CONNECTION_STRING")
 DATABASE_NAME = os.getenv("DATABASE_NAME")
 COLLECTION_NAME = os.getenv("COLLECTION_NAME")
+HISTORY_COLLECTION = os.getenv("HISTORY_COLLECTION")
 
 # Email configuration
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
@@ -40,6 +41,7 @@ EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 client = MongoClient(MONGODB_CONNECTION_STRING)
 db = client[DATABASE_NAME]
 collection = db[COLLECTION_NAME]
+meeting_history_collection = db[HISTORY_COLLECTION]
 
 
 def send_meeting_email(patient_name, patient_email, meeting_datetime, meet_link):
@@ -163,6 +165,20 @@ async def schedule_meeting(patientid: int, meeting_datetime: str):
             "scheduled_at": datetime.now().isoformat(),
             "email_sent": email_sent
         }
+
+        track_meeting = {
+            "patient_id": patientid,
+            "patient_email": patient['email'],
+            "meeting_details": [meeting_details]
+        }
+        past_meetings = meeting_history_collection.find_one({"patient_id": patientid})
+        if past_meetings:
+            update_history = meeting_history_collection.update_one(
+                {"patient_id": patientid},
+                {"$push": {"meeting_details": meeting_details}}
+            )
+        else:
+            history = meeting_history_collection.insert_one(track_meeting)           
         
         # Update patient record
         update_result = collection.update_one(
@@ -529,3 +545,23 @@ async def send_summary_template(mobile_number: str):
         raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to send summary template: {str(e)}")
+
+
+@app.get('/api/patient/meetings')
+async def get_patient_appointmets(patient_id: int):
+    try:
+        patient_appointments = meeting_history_collection.find_one({"patient_id": patient_id})
+        if not patient_appointments:
+            raise HTTPException(status_code=404, detail="No Appointments Scheduled")
+        
+        else:
+            now = datetime.now()
+            past_appointments = list(filter(lambda x: datetime.fromisoformat(x['meeting_datetime'])< now, patient_appointments['meeting_details']))
+            upcoming_appointments = list(filter(lambda x: datetime.fromisoformat(x['meeting_datetime'])>= now, patient_appointments['meeting_details']))
+
+        appointments= {"patient_id": patient_id,"upcoming_appointments":[upcoming_appointments], "past_appointments":[past_appointments]}
+            
+        return JSONResponse(status_code=200, content=appointments)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+
