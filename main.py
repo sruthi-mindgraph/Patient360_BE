@@ -118,7 +118,7 @@ If you need immediate assistance, contact our support team.
         return False
 
 @app.post('/api/schedule_meeting')
-async def schedule_meeting(patientid: int, meeting_datetime: str):
+async def schedule_meeting(patientid: int, meeting_datetime: str, therapy: str, therapy_mode: str):
     """Schedule a meeting and send email to patient"""
     try:
         # Fetch patient details
@@ -130,6 +130,14 @@ async def schedule_meeting(patientid: int, meeting_datetime: str):
         if not patient.get('email'):
             raise HTTPException(status_code=400, detail="Patient email not found in database")
         
+        # Validate mode of appointments and therapies selected
+        mode = ['online', 'offline']
+        if therapy_mode.lower() not in mode:
+            raise HTTPException(status_code=400, detail="Invalid mode of appointment")
+        therapies = ["Psychology", "Speech & Language Therapy", "Occupational Therapy", "Music Therapy", "Continuous Education", "Nutrition"]
+        if therapy not in therapies:
+            raise HTTPException(status_code=400, detail=f"Selected therapy unavailable for {therapy_mode} appointments")
+
         # Validate meeting datetime format
         try:
             meeting_dt = datetime.fromisoformat(meeting_datetime)
@@ -163,6 +171,8 @@ async def schedule_meeting(patientid: int, meeting_datetime: str):
             "meeting_link": meet_link,
             "meeting_datetime": meeting_datetime,
             "scheduled_at": datetime.now().isoformat(),
+            "therapy": therapy,
+            "therapy_mode": therapy_mode,
             "email_sent": email_sent
         }
 
