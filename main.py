@@ -30,6 +30,7 @@ MONGODB_CONNECTION_STRING = os.getenv("MONGODB_CONNECTION_STRING")
 DATABASE_NAME = os.getenv("DATABASE_NAME")
 COLLECTION_NAME = os.getenv("COLLECTION_NAME")
 HISTORY_COLLECTION = os.getenv("HISTORY_COLLECTION")
+APPOINTMENTS_COLLECTION = os.getenv("APPOINTMENTS_COLLECTION")
 
 # Email configuration
 SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
@@ -42,6 +43,7 @@ client = MongoClient(MONGODB_CONNECTION_STRING)
 db = client[DATABASE_NAME]
 collection = db[COLLECTION_NAME]
 meeting_history_collection = db[HISTORY_COLLECTION]
+appointments_collection = db[APPOINTMENTS_COLLECTION]
 
 
 def send_meeting_email(patient_name, patient_email, meeting_datetime, meet_link):
@@ -558,8 +560,11 @@ async def send_summary_template(mobile_number: str):
 
 
 @app.get('/api/patient/meetings')
-async def get_patient_appointmets(patient_id: int):
+async def get_patient_meetings(patient_id: int):
     try:
+        patient = collection.find_one({"patientid": patient_id}, {"_id": 0})
+        if not patient:
+            raise HTTPException(status_code=404, detail="Patient not found")
         patient_appointments = meeting_history_collection.find_one({"patient_id": patient_id})
         if not patient_appointments:
             raise HTTPException(status_code=404, detail="No Appointments Scheduled")
@@ -572,6 +577,111 @@ async def get_patient_appointmets(patient_id: int):
         appointments= {"patient_id": patient_id,"upcoming_appointments":[upcoming_appointments], "past_appointments":[past_appointments]}
             
         return JSONResponse(status_code=200, content=appointments)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
+
+# API to Schedule Appointments without therapy and its mode
+@app.post('/api/patient/schedule_appointments')
+async def schedule_appointment(patientid: int, meeting_datetime: str):
+    """Schedule a meeting and send email to patient"""
+    try:
+        # Fetch patient details
+        patient = collection.find_one({"patientid": patientid}, {"_id": 0})
+        if not patient:
+            raise HTTPException(status_code=404, detail="Patient not found")
+        
+        # Validate patient email
+        if not patient.get('email'):
+            raise HTTPException(status_code=400, detail="Patient email not found in database")
+
+        # Validate meeting datetime format
+        try:
+            meeting_dt = datetime.fromisoformat(meeting_datetime)
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid datetime format. Use: YYYY-MM-DDTHH:MM:SS")
+        
+        # Check if meeting is in the future
+        if meeting_dt <= datetime.now():
+            raise HTTPException(status_code=400, detail="Meeting datetime must be in the future")
+        
+        start_dt = datetime.fromisoformat(meeting_datetime)
+        end_dt = start_dt + timedelta(hours=1)
+
+        meet_link = create_google_meet_event(
+            summary=f"Consultation with {patient['name']}",
+            description="Health Consultation via Google Meet",
+            start_time=start_dt.isoformat(),
+            end_time=end_dt.isoformat()
+        )
+
+        # Send email with meeting details
+        email_sent = send_meeting_email(
+            patient['name'], 
+            patient['email'], 
+            meeting_datetime,
+            meet_link
+        )
+        
+        # Store meeting details in database
+        meeting_details = {
+            "meeting_link": meet_link,
+            "meeting_datetime": meeting_datetime,
+            "scheduled_at": datetime.now().isoformat(),
+            "email_sent": email_sent
+        }
+
+        track_meeting = {
+            "patient_id": patientid,
+            "patient_email": patient['email'],
+            "meeting_details": [meeting_details]
+        }
+        past_meetings = appointments_collection.find_one({"patient_id": patientid})
+        if past_meetings:
+            update_history = appointments_collection.update_one(
+                {"patient_id": patientid},
+                {"$push": {"meeting_details": meeting_details}}
+            )
+        else:
+            history = appointments_collection.insert_one(track_meeting)           
+        
+        return JSONResponse(status_code=200, content={
+            "message": f"Meeting scheduled successfully for {patient['name']}",
+            "patient_name": patient['name'],
+            "patient_email": patient['email'],
+            "meeting_link": meet_link,
+            "meeting_datetime": meeting_datetime,
+            "email_sent": email_sent,
+            "status": "success"
+        })
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to schedule meeting: {str(e)}")
+
+
+@app.get('/api/patient/appointments')
+async def get_patient_appointmets(patient_id: int):
+    try:
+        patient = collection.find_one({"patientid": patient_id}, {"_id": 0})
+        if not patient:
+            raise HTTPException(status_code=404, detail="Patient not found")
+        patient_appointments = appointments_collection.find_one({"patient_id": patient_id})
+        if not patient_appointments:
+            raise HTTPException(status_code=404, detail="No Appointments Scheduled")
+        
+        else:
+            now = datetime.now()
+            past_appointments = list(filter(lambda x: datetime.fromisoformat(x['meeting_datetime'])< now, patient_appointments['meeting_details']))
+            upcoming_appointments = list(filter(lambda x: datetime.fromisoformat(x['meeting_datetime'])>= now, patient_appointments['meeting_details']))
+
+        appointments= {"patient_id": patient_id,"upcoming_appointments":[upcoming_appointments], "past_appointments":[past_appointments]}
+            
+        return JSONResponse(status_code=200, content=appointments)
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Internal Server Error: {str(e)}")
 
